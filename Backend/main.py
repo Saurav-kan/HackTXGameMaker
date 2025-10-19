@@ -10,9 +10,13 @@ import json
 from typing import Optional
 import logging
 import uvicorn
-from fastapi import FastAPI
+import uuid
+import subprocess
+import shutil
+from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
 # Load environment variables from the .env file in the same directory as main.py
@@ -30,6 +34,10 @@ from engine.game_engine import GameEngine
 # --- Web Server Setup (FastAPI) ---
 
 app = FastAPI()
+
+# In-memory storage for task statuses
+# For a production application, you would use a more robust solution like Redis or a database.
+tasks = {}
 
 # Configure CORS
 app.add_middleware(
@@ -54,43 +62,108 @@ class GenerationRequest(BaseModel):
     gameMode: str
     settings: GameSettings
 
-@app.post("/api/generate")
-async def generate_game_endpoint(request: GenerationRequest):
-    """
-    API endpoint to receive game generation requests from the frontend.
-    """
-    logger.info("Received game generation request from frontend.")
-    
-    api_key = os.getenv('GEMINI_API_KEY')
-    if not api_key:
-        return {"error": "Gemini API key not found on the server."}
+import subprocess
+import shutil
 
+def run_game_generation(task_id: str, request: GenerationRequest):
+    """The actual game generation logic that runs in the background."""
+    logger.info(f"[{task_id}] Starting game generation...")
+    tasks[task_id] = {'status': 'IN_PROGRESS', 'result': None}
     try:
-        # You can adapt this part to use more of your existing classes if needed
+        api_key = os.getenv('GEMINI_API_KEY')
+        if not api_key:
+            raise ValueError("Gemini API key not found on the server.")
+
         creation_agent = GameCreationAgent(api_key)
-        
-        # For now, we'll use the world description as the main theme.
-        # You can build a more detailed prompt from the request data.
         theme = request.worldDescription
         if request.imageDescription:
             theme += f" with an image of {request.imageDescription}"
 
+        logger.info(f"[{task_id}] Generating game package...")
         game_package = creation_agent.create_game_autonomously(theme)
-        
         filepath = creation_agent.save_game(game_package)
+        logger.info(f"[{task_id}] Game package saved to {filepath}")
         
-        logger.info(f"Game generated and saved to {filepath}")
+        # --- Create Executable ---
+        logger.info(f"[{task_id}] Starting packaging process...")
+        tasks[task_id]['status'] = 'PACKAGING'
+        game_filename = os.path.basename(filepath)
+        game_name = os.path.splitext(game_filename)[0]
         
-        return {
-            "message": "Game generated successfully!",
+        backend_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        pyinstaller_exe_path = os.path.expanduser("~/AppData/Roaming/Python/Python312/Scripts/pyinstaller.exe")
+        if not os.path.exists(pyinstaller_exe_path):
+            pyinstaller_exe_path = "pyinstaller"
+
+        pyinstaller_command = [
+            pyinstaller_exe_path,
+            "--onefile",
+            "--name", game_name,
+            "--distpath", os.path.join(backend_dir, "dist"),
+            "--workpath", os.path.join(backend_dir, "build"),
+            "--specpath", os.path.join(backend_dir, "spec"),
+            os.path.abspath(filepath)  # Use absolute path here
+        ]
+
+        process = subprocess.run(pyinstaller_command, capture_output=True, encoding="utf-8", text=True, cwd=backend_dir)
+        logger.info(f"[{task_id}] PyInstaller finished.")
+
+        if process.returncode != 0:
+            logger.error(f"[{task_id}] PyInstaller failed: {process.stderr}")
+            raise Exception(f"PyInstaller failed: {process.stderr}")
+
+        exe_filename = f"{game_name}.exe"
+        dist_path = os.path.join(backend_dir, "dist", exe_filename)
+        final_exe_path = os.path.join(backend_dir, "games", exe_filename)
+
+        shutil.move(dist_path, final_exe_path)
+
+        # exe_filename_only = os.path.basename(final_exe_path)
+        # result = {
+        #     "message": "Game generated and packaged successfully!",
+        #     "title": game_package.get('concept', {}).get('title', 'Unknown'),
+        #     "description": game_package.get('concept', {}).get('description', 'Unknown'),
+        #     "python_script": exe_filename_only,
+        #     "executable_file": final_exe_path 
+        # }
+        # tasks[task_id] = {'status': 'SUCCESS', 'result': result}
+        exe_filename_only = os.path.basename(final_exe_path)
+
+        result = {
+            "message": "Game generated and packaged successfully!",
             "title": game_package.get('concept', {}).get('title', 'Unknown'),
             "description": game_package.get('concept', {}).get('description', 'Unknown'),
-            "filepath": filepath
+            "python_script": exe_filename_only, 
+            "executable_file": exe_filename_only
         }
+        tasks[task_id] = {'status': 'SUCCESS', 'result': result}
+        logger.info(f"[{task_id}] Game generation successful.")
 
     except Exception as e:
-        logger.error(f"Error during game generation: {e}")
-        return {"error": f"An error occurred during game generation: {e}"}
+        logger.error(f"Error during game generation for task {task_id}: {e}")
+        tasks[task_id] = {'status': 'FAILURE', 'result': {'error': str(e)}}
+
+@app.post("/api/generate/start")
+async def start_generation_endpoint(request: GenerationRequest, background_tasks: BackgroundTasks):
+    """
+    Starts the game generation as a background task and returns a task ID.
+    """
+    task_id = str(uuid.uuid4())
+    tasks[task_id] = {'status': 'PENDING', 'result': None}
+    background_tasks.add_task(run_game_generation, task_id, request)
+    
+    return {"task_id": task_id}
+
+@app.get("/api/generate/status/{task_id}")
+async def get_generation_status(task_id: str):
+    """
+    Checks the status of a game generation task.
+    """
+    task = tasks.get(task_id)
+    if not task:
+        return {"error": "Task not found."}
+    return task
 
 
 @app.get("/api/game/{game_filename}")
@@ -99,7 +172,6 @@ async def download_game_file(game_filename: str):
     Serves the generated game file for download.
     """
     games_dir = "games"
-    # Sanitize the filename to prevent directory traversal attacks
     game_filename = os.path.basename(game_filename)
     filepath = os.path.join(games_dir, game_filename)
     
@@ -108,6 +180,30 @@ async def download_game_file(game_filename: str):
     
     return {"error": "File not found."}
 
+
+@app.get("/api/game/download/{game_filename}")
+async def download_executable_file(game_filename: str):
+    # Get the absolute path of the directory where main.py is running
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # CRITICAL: Construct the full absolute path to the file in the 'games' folder
+    games_dir = "games"
+    filepath = os.path.join(backend_dir, games_dir, os.path.basename(game_filename))
+    
+    # DEBUG: Log the exact path being checked
+    logger.info(f"Checking for file at: {filepath}")
+    
+    # Check for file existence
+    if os.path.exists(filepath):
+        logger.info(f"File FOUND. Serving: {game_filename}")
+        return FileResponse(
+            path=filepath, 
+            media_type='application/vnd.microsoft.portable-executable', 
+            filename=game_filename
+        )
+    
+    logger.error(f"File NOT found: {filepath}")
+    return {"error": "File not found."}
 
 # --- Existing CLI Code ---
 

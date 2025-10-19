@@ -70,7 +70,7 @@ class GeminiGameGenerator:
             "sound_theme": "Audio theme description"
         }}
         
-        Make it creative, engaging, and suitable for a topdown 2D game. Focus on clear, implementable mechanics.
+        Make it creative, engaging, and suitable for a topdown or platformer 2D game. Focus on clear, implementable mechanics.
         """
         
         try:
@@ -175,8 +175,10 @@ class GeminiGameGenerator:
         9. Add basic graphics (colored rectangles/circles are fine)
         10. Include game states (menu, playing, game over)
         
-        Generate a complete, runnable Python file. Include all necessary imports and a main() function.
+       Generate a complete, runnable Python file. Include all necessary imports and a main() function.
         Use simple colored shapes for graphics - no external images needed.
+ 
+        **IMPORTANT: Your response MUST contain ONLY the Python code, wrapped in a single markdown block (```python ... ```) and nothing else. DO NOT include any introductory or concluding text.**
         """
         
         try:
