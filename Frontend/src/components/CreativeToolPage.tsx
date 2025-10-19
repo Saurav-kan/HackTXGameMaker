@@ -52,30 +52,55 @@ export function CreativeToolPage({ onGenerate }: CreativeToolPageProps = {}) {
     }
   };
 
-  const handleStartGenerating = () => {
-    setStage('loading');
-    // Trigger generation logic here
-    console.log('Starting generation with:', {
-      worldDescription,
-      uploadedImage,
-      imageDescription,
-      imageCategory: imageCategory === 'Other' ? customCategory : imageCategory,
-      gameMode,
-      settings: {
-        horrorLevel,
-        puzzleComplexity,
-        ageGroup,
-        speedChaos,
-      }
+  const handleStartGenerating = async () => {
+  setStage('loading');
+
+  // This is the data payload you'll send. It's already well-structured!
+  const generationData = {
+    worldDescription,
+    uploadedImage, // This will be a base64 string, which is fine for JSON
+    imageDescription,
+    imageCategory: imageCategory === 'Other' ? customCategory : imageCategory,
+    gameMode,
+    settings: {
+      horrorLevel,
+      puzzleComplexity,
+      ageGroup,
+      speedChaos,
+    }
+  };
+
+  try {
+    // The fetch call to your backend API
+    const response = await fetch('http://localhost:8000/api/generate', { 
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(generationData),
     });
 
-    // After loading, transition to edit page
+    if (!response.ok) {
+      // Handle HTTP errors
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const result = await response.json();
+    console.log('Backend response:', result);
+
+    // Your existing timeout to switch to the edit page
     setTimeout(() => {
       if (onGenerate) {
         onGenerate();
       }
     }, 4000);
-  };
+
+  } catch (error) {
+    console.error("There was a problem with the fetch operation:", error);
+    // You might want to handle the error state in your UI here
+    // For example, setStage('input') to allow the user to try again.
+  }
+};
 
   return (
     <div className="relative min-h-screen">
