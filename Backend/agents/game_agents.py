@@ -7,9 +7,11 @@ import os
 import json
 import time
 import random
+import textwrap
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 import logging
+from assets.asset_manager import get_sprite_manifest
 
 from generators.gemini_generator import GeminiGameGenerator
 from engine.game_engine import GameEngine
@@ -20,44 +22,109 @@ class GameCreationAgent:
     """Main agent for autonomous game creation"""
     
     def __init__(self, api_key: Optional[str] = None):
-        self.gemini = GeminiGameGenerator(api_key)
+        self.generator = GeminiGameGenerator(api_key)
         self.created_games = []
         self.current_game = None
+
+    @staticmethod
+    def _read_template_file(template_id: str) -> str:
+        """Reads the content of a specific template file."""
+        # Maps template ID to the actual file name
+        template_map = {
+            "A_CORE_SETUP": "template_A_core_setup.py",
+            "B_MOVEMENT_TOPDOWN": "template_B_movement_topdown.py",
+            "C_MOVEMENT_PLATFORMER": "template_C_movement_platformer.py",
+            "D_HEALTH_DAMAGE": "template_D_health_damage.py",
+            "E_BASIC_COLLISION": "template_E_basic_collision.py",
+            "F_GAME_STATES": "template_F_game_states.py",
+            "G_ASSET_PATH_HANDLER": "template_G_asset_path_handler.py",
+        }
         
-    def create_game_autonomously(self, theme: str = None) -> Dict[str, Any]:
-        """Create a complete game autonomously"""
-        logger.info(f"Starting autonomous game creation with theme: {theme}")
+        filename = template_map.get(template_id)
+        if not filename:
+            return f"# ERROR: Template ID '{template_id}' not found.\n"
+
+        # CRITICAL: Construct the path relative to the current file's directory
+        # Assumes 'templates' folder is a sibling of 'agents' or relative to the script root.
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        template_path = os.path.join(base_dir, "..", "templates", filename)
         
-        # Step 1: Generate game concept
-        logger.info("Generating game concept...")
-        game_concept = self.gemini.generate_game_concept(theme)
+        # Fallback path if templates folder is in the root directory (where main.py is)
+        if not os.path.exists(template_path):
+            root_dir = os.path.abspath(os.path.join(base_dir, ".."))
+            template_path = os.path.join(root_dir, "templates", filename)
+
+        try:
+            with open(template_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except FileNotFoundError:
+            return f"# ERROR: Template file not found at {template_path}\n"
+        except Exception as e:
+            return f"# ERROR reading template {filename}: {str(e)}\n"
+
+    @staticmethod
+    def stitch_templates(template_ids: list) -> str:
+        """Combines template code into a single string for the LLM."""
+        stitched_code = ["# --- START GENERATED GAME CODE TEMPLATE ---"]
         
-        # Step 2: Generate level design
-        logger.info("Generating level design...")
-        level_design = self.gemini.generate_level_design(game_concept, 1)
+        for template_id in template_ids:
+            # Add a clear marker before each template for debugging/review
+            stitched_code.append(f"\n# --- TEMPLATE: {template_id} ---")
+            stitched_code.append(GameCreationAgent._read_template_file(template_id))
+            
+        stitched_code.append("\n# --- END GENERATED GAME CODE TEMPLATE ---")
         
-        # Step 3: Generate game code
-        logger.info("Generating game code...")
-        game_code = self.gemini.generate_game_code(game_concept, level_design)
+        return "\n".join(stitched_code)
         
-        # Step 4: Generate asset descriptions
-        logger.info("Generating asset descriptions...")
-        asset_descriptions = self.gemini.generate_asset_descriptions(game_concept)
+    def create_game_autonomously(self, theme: str, existing_concept: Optional[dict] = None) -> Dict[str, Any]:
+        """Orchestrates game creation using templates."""
         
-        # Step 5: Create game package
+        # 1. GENERATE GAME CONCEPT
+        # This step remains the same:
+        game_concept = existing_concept or self.generator.generate_game_concept(theme)
+        
+        # 2. GENERATE TEMPLATE PLAN (New Step)
+        template_ids = self.generator.generate_template_plan(game_concept)
+        logger.info(f"Templates selected: {template_ids}")
+        
+        # 3. STITCH TEMPLATES (New Step)
+        stitched_template_code = GameCreationAgent.stitch_templates(template_ids)
+        
+        # 4. GENERATE LEVEL DESIGN (This remains the same)
+        level_design = self.generator.generate_level_design(game_concept)
+        
+        # 5. GENERATE FINAL CODE (CRITICAL CHANGE)
+        # We pass the stitched code to the LLM
+        final_code_blocks = self.generator.generate_game_code(
+            game_concept, 
+            level_design, 
+            stitched_template_code  # <-- NEW ARGUMENT
+        )
+
+        sprite_manifest = get_sprite_manifest()
+
+    # 6. ASSEMBLE FINAL SCRIPT
+        final_script = final_code_blocks 
+        final_script = textwrap.dedent(final_script).strip()
+        
+        # --- CRITICAL NEW LOGGING STEP ---
+        logger.info("-" * 50)
+        logger.info(f"FINAL SCRIPT CODE GENERATED:\n{final_script[:2100]}...\n(Code snippet truncated for log brevity)")
+        logger.info("-" * 50)
+        # -----------------------------------
+
+        # 7. GENERATE ASSETS & PACKAGE 
+        asset_descriptions = self.generator.generate_asset_descriptions(game_concept, sprite_manifest)
+        
+        # 8. PACKAGE AND SAVE
         game_package = {
             "concept": game_concept,
             "level_design": level_design,
-            "code": game_code,
+            "code": final_script, # <-- The code string is stored here
             "assets": asset_descriptions,
             "created_at": datetime.now().isoformat(),
             "theme": theme
         }
-        
-        self.current_game = game_package
-        self.created_games.append(game_package)
-        
-        logger.info(f"Game creation complete: {game_concept.get('title', 'Unknown')}")
         return game_package
     
     def save_game(self, game_package: Dict[str, Any], filename: str = None) -> str:

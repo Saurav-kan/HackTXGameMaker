@@ -8,6 +8,7 @@ import json
 import google.generativeai as genai
 from typing import Dict, List, Any, Optional
 import logging
+import random
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -17,29 +18,92 @@ class GeminiGameGenerator:
     """Main class for interfacing with Gemini AI for game generation"""
     
     def __init__(self, api_key: Optional[str] = None):
-        """Initialize the Gemini client"""
         self.api_key = api_key or os.getenv('GEMINI_API_KEY')
         if not self.api_key:
-            raise ValueError("Gemini API key not found. Set GEMINI_API_KEY environment variable.")
-        
+            raise ValueError("Gemini API key not found...")
+        # ... API Key Setup ...
         genai.configure(api_key=self.api_key)
-        # Try different model names for compatibility
+        
+        # Define models based on task tier
         try:
-            self.model = genai.GenerativeModel('gemini-2.5-flash')
+            self.planning_model = genai.GenerativeModel('gemini-2.5-flash-lite')
         except:
-            try:
-                self.model = genai.GenerativeModel('gemini-2.5-pro')
-            except:
-                self.model = genai.GenerativeModel('gemini-pro')
+            self.planning_model = genai.GenerativeModel('gemini-2.5-flash') # Fallback
+
+        try:
+            self.coding_model = genai.GenerativeModel('gemini-2.5-flash')
+        except:
+            self.coding_model = genai.GenerativeModel('gemini-2.5-pro') # High-end fallback
+    
+    def generate_template_plan(self, game_concept: Dict[str, Any]) -> List[str]:
+        """
+        Analyzes the game concept and selects the necessary templates.
+        """
+        # The current core templates that are ALWAYS selected:
+        always_selected = ["A_CORE_SETUP", "D_HEALTH_DAMAGE", "E_BASIC_COLLISION", "F_GAME_STATES", "G_ASSET_PATH_HANDLER"]
+        
+        prompt = f"""
+        You are an expert build system architect. Your task is to select the necessary core movement template 
+        for the game described below and combine it with the always-selected templates.
+        
+        Game Genre: {game_concept.get('genre', 'Unknown')}
+        Key Mechanics: {', '.join(game_concept.get('mechanics', []))}
+        
+        AVAILABLE TEMPLATES:
+        - B_MOVEMENT_TOPDOWN: For games with continuous X/Y movement (e.g., RPG, Shooter).
+        - C_MOVEMENT_PLATFORMER: For games with gravity, jumping, and ground collision.
+        
+        ALWAYS SELECTED TEMPLATES:
+        - {', '.join(always_selected)}
+        
+        RULES:
+        1. Select EITHER B_MOVEMENT_TOPDOWN OR C_MOVEMENT_PLATFORMER.
+        2. Combine the selection with ALL ALWAYS SELECTED templates.
+        3. Output your result as a simple JSON array of the FINAL, COMBINED list of template IDs.
+        
+        Example Output: ["A_CORE_SETUP", "D_HEALTH_DAMAGE", ..., "B_MOVEMENT_TOPDOWN"]
+        
+        JSON Output ONLY:
+        """
+        try:
+            response = self.planning_model.generate_content(prompt)
+            content = response.text.strip()
+            
+            # 1. Aggressive Slicing (CRITICAL FIX): Look for the first '[' and last ']'
+            json_start = content.find('[') 
+            json_end = content.rfind(']') 
+            
+            if json_start != -1 and json_end != -1:
+                content = content[json_start:json_end + 1] 
+            
+            # 2. Clean up markdown fences (secondary cleanup)
+            if content.startswith('```json'):
+                content = content[7:-3].strip()
+            elif content.startswith('```'):
+                content = content[3:-3].strip()
+
+            # The clean JSON object is now passed to the parser
+            return json.loads(content)
+            
+        except Exception as e:
+            logger.error(f"Error generating template plan: {e}")
+            # FALLBACK: If the LLM fails, default to a safe, working list (Top-Down)
+            return always_selected + ["B_MOVEMENT_TOPDOWN"]
         
     def generate_game_concept(self, theme: str = None) -> Dict[str, Any]:
-        """Generate a complete game concept using Gemini"""
+        """Generate a complete game concept using Gemini with a random seed."""
+        # 1. GENERATE A RANDOM SEED
+        random_seed = random.randint(100000, 999999) 
+        
         prompt = f"""
-        You are an expert game designer. Create a complete game concept for a topdown 2D game.
-        
-        Theme: {theme or "Choose an engaging theme"}
-        
-        Please provide a JSON response with the following structure:
+            You are an expert game designer. Create a complete game concept for a topdown 2D game.
+            
+            Theme: {theme or "Choose an engaging theme"}
+            
+            # CRITICAL: Include the random seed in the prompt to force model variation.
+            INTERNAL VARIATION SEED: {random_seed}
+            
+            Please provide a JSON response with the following structure:
         {{
             "title": "Game Title",
             "description": "Brief game description",
@@ -74,19 +138,25 @@ class GeminiGameGenerator:
         """
         
         try:
-            response = self.model.generate_content(prompt)
-            # Extract JSON from response
+            response = self.planning_model.generate_content(prompt)
             content = response.text.strip()
             
-            # Try to find JSON in the response
-            if content.startswith('```json'):
-                content = content[7:-3]
-            elif content.startswith('```'):
-                content = content[3:-3]
+            # 1. Aggressive Slicing to isolate the JSON object (CRITICAL FIX)
+            json_start = content.find('{')
+            json_end = content.rfind('}')
             
-            game_concept = json.loads(content)
-            logger.info(f"Generated game concept: {game_concept.get('title', 'Unknown')}")
-            return game_concept
+            if json_start != -1 and json_end != -1:
+                # Slice the string to only include content from the first '{' to the last '}'
+                content = content[json_start:json_end + 1] 
+            
+            # 2. Clean up markdown fences (secondary cleanup)
+            if content.startswith('```json'):
+                content = content[7:-3].strip()
+            elif content.startswith('```'):
+                content = content[3:-3].strip()
+
+            # The clean JSON object is now passed to the parser
+            return json.loads(content)
             
         except Exception as e:
             logger.error(f"Error generating game concept: {e}")
@@ -136,13 +206,22 @@ class GeminiGameGenerator:
         """
         
         try:
-            response = self.model.generate_content(prompt)
+            response = self.planning_model.generate_content(prompt)
             content = response.text.strip()
             
+            # 1. Aggressive Slicing to isolate the JSON object (CRITICAL FIX)
+            json_start = content.find('{')
+            json_end = content.rfind('}')
+            
+            if json_start != -1 and json_end != -1:
+                # Slice the string to only include content from the first '{' to the last '}'
+                content = content[json_start:json_end + 1] 
+
+            # 2. Clean up markdown fences (secondary cleanup)
             if content.startswith('```json'):
-                content = content[7:-3]
+                content = content[7:-3].strip()
             elif content.startswith('```'):
-                content = content[3:-3]
+                content = content[3:-3].strip()
             
             level_design = json.loads(content)
             logger.info(f"Generated level design for level {level_number}")
@@ -152,37 +231,31 @@ class GeminiGameGenerator:
             logger.error(f"Error generating level design: {e}")
             return self._get_fallback_level(level_number)
     
-    def generate_game_code(self, game_concept: Dict[str, Any], level_design: Dict[str, Any]) -> str:
-        """Generate pygame code for the game"""
+    def generate_game_code(self, game_concept: Dict[str, Any], level_design: Dict[str, Any], stitched_template: str) -> str:
+        """Generate pygame code by filling in the unique logic for the template."""
+        
         prompt = f"""
-        Generate complete pygame code for this game:
+        You are a specialized Pygame coder. Your task is to complete the provided Python code template 
+        by generating the unique logic required for this specific game.
         
-        Game Concept:
-        {json.dumps(game_concept, indent=2)}
+        Game Concept: {json.dumps(game_concept, indent=2)}
+        Level Design: {json.dumps(level_design, indent=2)}
         
-        Level Design:
-        {json.dumps(level_design, indent=2)}
+        INSTRUCTIONS:
+        1. Analyze the provided template code and the concept/design data.
+        2. **Generate ONLY** the Python code necessary to replace the **[LLM_INJECT_...]** placeholders.
+        3. The generated code MUST be correct, functional Python that integrates seamlessly into the existing template structure.
         
-        Requirements:
-        1. Use pygame for the game engine
-        2. Implement topdown 2D view
-        3. Include player movement (WASD or arrow keys)
-        4. Implement all game mechanics from the concept
-        5. Add collision detection
-        6. Include basic enemy AI
-        7. Add powerup collection
-        8. Implement scoring system
-        9. Add basic graphics (colored rectangles/circles are fine)
-        10. Include game states (menu, playing, game over)
+        --- CODE TEMPLATE FOR COMPLETION ---
+        {stitched_template}
+        --- END OF TEMPLATE ---
         
-       Generate a complete, runnable Python file. Include all necessary imports and a main() function.
-        Use simple colored shapes for graphics - no external images needed.
- 
-        **IMPORTANT: Your response MUST contain ONLY the Python code, wrapped in a single markdown block (```python ... ```) and nothing else. DO NOT include any introductory or concluding text.**
+        YOUR RESPONSE MUST CONTAIN ONLY the Python code needed to fill ALL placeholders, 
+        wrapped in a single markdown block (```python ... ```) and nothing else.
         """
         
         try:
-            response = self.model.generate_content(prompt)
+            response = self.coding_model.generate_content(prompt)
             code = response.text.strip()
             
             # Clean up the code if it's wrapped in markdown
@@ -198,54 +271,61 @@ class GeminiGameGenerator:
             logger.error(f"Error generating game code: {e}")
             return self._get_fallback_code()
     
-    def generate_asset_descriptions(self, game_concept: Dict[str, Any]) -> Dict[str, str]:
-        """Generate descriptions for game assets"""
+    def generate_asset_descriptions(self, game_concept: Dict[str, Any], sprite_manifest: List[str]) -> Dict[str, str]:
+        """Generate descriptions AND select sprites for game assets."""
+        
         prompt = f"""
-        For this game concept, provide simple descriptions for creating basic visual assets:
+        Based on the game concept, your task is to select visual assets from the provided SPRITE LIBRARY. 
         
-        Game: {game_concept.get('title', 'Unknown')}
-        Visual Style: {game_concept.get('visual_style', 'Unknown')}
+        Game Concept: {json.dumps(game_concept, indent=2)}
         
-        Provide JSON with asset descriptions:
+        --- SPRITE LIBRARY MANIFEST (Available Files) ---
+        {sprite_manifest}
+        ---
+        
+        REQUIREMENTS:
+        1. For each item in the output JSON (player, basic enemy, powerup), you MUST select one filename from the SPRITE LIBRARY to use as the visual asset.
+        2. If no appropriate image is found, assign the value 'SIMPLE_SHAPE' and provide a color description (e.g., 'SIMPLE_SHAPE, Red').
+        3. The output MUST be a JSON object containing the game object role mapped to the chosen filename or 'SIMPLE_SHAPE'.
+        
+        Provide JSON output ONLY with the following structure:
         {{
-            "player": "Description of player character appearance",
+            "player_sprite": "chosen_file_name.png OR SIMPLE_SHAPE, Color",
             "enemies": {{
-                "basic": "Description of basic enemy",
-                "aggressive": "Description of aggressive enemy"
+                "basic": "chosen_file_name.png OR SIMPLE_SHAPE, Color",
+                "aggressive": "chosen_file_name.png OR SIMPLE_SHAPE, Color"
             }},
             "powerups": {{
-                "health": "Description of health powerup",
-                "speed": "Description of speed powerup"
+                "health": "chosen_file_name.png OR SIMPLE_SHAPE, Color"
             }},
-            "obstacles": {{
-                "wall": "Description of wall obstacle",
-                "rock": "Description of rock obstacle"
-            }},
-            "background": "Description of background/environment",
-            "ui_elements": {{
-                "score": "Description of score display",
-                "health_bar": "Description of health bar"
-            }}
+            "background_asset": "chosen_file_name.png OR SIMPLE_SHAPE, Color"
         }}
-        
-        Keep descriptions simple and suitable for basic colored shapes or simple graphics.
         """
         
         try:
             response = self.model.generate_content(prompt)
             content = response.text.strip()
             
+            # 1. Aggressive Slicing (CRITICAL FIX)
+            json_start = content.find('{')
+            json_end = content.rfind('}')
+            
+            if json_start != -1 and json_end != -1:
+                content = content[json_start:json_end + 1] 
+
+            # 2. Clean up markdown fences (secondary cleanup)
             if content.startswith('```json'):
-                content = content[7:-3]
+                content = content[7:-3].strip()
             elif content.startswith('```'):
-                content = content[3:-3]
+                content = content[3:-3].strip()
             
             assets = json.loads(content)
-            logger.info("Generated asset descriptions")
+            logger.info("Generated asset selections")
             return assets
             
         except Exception as e:
-            logger.error(f"Error generating asset descriptions: {e}")
+            logger.error(f"Error generating asset selections: {e}")
+            # NOTE: A robust fallback is necessary since the selection failed
             return self._get_fallback_assets()
     
     def _get_fallback_concept(self, theme: str = None) -> Dict[str, Any]:
